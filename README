@@ -1,0 +1,190 @@
+CADDY — ИНСТРУКЦИЯ ПО УПРАВЛЕНИЮ САЙТАМИ (проект polka)
+
+Схема: внешний прокси (rev-proxy, IP 10.97.99.22) терминирует TLS и
+проксирует на бэкенд (dod-sv-shelf, IP 10.96.99.18), где локальный Caddy
+слушает :80 (HTTP) и :8090 (WebSocket) как catch-all-блоки.
+
+Внешний Caddyfile: ~/projects/caddy/Caddyfile на rev-proxy
+Локальный (бэкенд) Caddyfile: ~/projects/polka-new/Caddyfile на dod-sv-shelf
+Доверенные внутренние подсети: 10.96.0.0/16, 10.97.0.0/16, 10.99.0.0/16
+Скрипт firewall-переключателя портов: ~/projects/polka-new/ports80-8090.sh
+
+
+1. ДОБАВИТЬ НОВЫЙ САЙТ (публичный, с настоящим TLS)
+
+Добавляется только на внешнем прокси — бэкенд ничего не знает про домены,
+он catch-all по портам.
+
+~/projects/caddy/Caddyfile:
+
+new-domain.example.com {
+    reverse_proxy <IP_бэкенда>:<порт>
+}
+
+Требования:
+- домен резолвится в публичный IP внешнего прокси;
+- порты 80/443 открыты из интернета (нужны для ACME HTTP-01 challenge);
+- не указывайте tls internal — без него Caddy сам получит настоящий
+  сертификат Let's Encrypt.
+
+
+2. ДОБАВИТЬ САЙТ, ДОСТУПНЫЙ ТОЛЬКО ИЗ ВНУТРЕННЕЙ СЕТИ
+
+internal-domain.example.com {
+    tls internal
+
+    @internal {
+        remote_ip 10.96.0.0/16 10.97.0.0/16 10.99.0.0/16
+    }
+
+    reverse_proxy @internal <IP_бэкенда>:<порт>
+    respond 403
+}
+
+tls internal — самоподписанный сертификат от локального CA Caddy
+(клиентам нужно один раз установить root-сертификат в доверенные, см.
+раздел 7). Запросы не из перечисленных подсетей получают 403. Для
+отдельного порта (например, WebSocket на :8090) — тот же паттерн,
+отдельным блоком: internal-domain.example.com:8090 { ... }
+
+
+3. ОТКЛЮЧИТЬ / УДАЛИТЬ САЙТ
+
+Просто удалите или закомментируйте весь блок в Caddyfile:
+
+# domain-off.example.com {
+#     reverse_proxy ...
+# }
+
+Затем обязательно reload (см. раздел 4) — само по себе редактирование
+файла ничего не меняет, пока конфиг не перечитан.
+
+
+4. ПРИМЕНИТЬ ИЗМЕНЕНИЯ КОНФИГА
+
+Проверить синтаксис перед применением:
+docker exec caddy caddy validate --config /etc/caddy/Caddyfile
+
+Применить без даунтайма (hot reload):
+docker exec caddy caddy reload --config /etc/caddy/Caddyfile
+
+Если после reload изменения не видны — принудительно:
+docker exec caddy caddy reload --config /etc/caddy/Caddyfile --force
+
+Полный перезапуск контейнера (если reload не помогает, либо менялся
+docker-compose.yml/volumes):
+docker compose up -d --force-recreate caddy
+
+
+5. ЛОГИ
+
+Общие логи Caddy (в реальном времени):
+docker logs -f caddy
+
+Логи запросов (access log) — по умолчанию выключены, нужно добавить log
+в site-блок:
+
+example.com {
+    log
+    reverse_proxy ...
+}
+
+Смотреть отфильтрованно:
+docker logs -f caddy | jq -r 'select(.logger == "http.log.access") | "\(.request.remote_ip) \(.request.method) \(.request.uri) -> \(.status)"'
+
+
+6. ПОСМОТРЕТЬ ФАКТИЧЕСКИ ПРИМЕНЁННЫЙ КОНФИГ
+
+Файл на диске может отличаться от того, что реально исполняется (если
+забыли reload). Проверка через Admin API:
+docker exec caddy wget -qO- http://localhost:2019/config/ | python3 -m json.tool
+
+
+7. КОРНЕВОЙ СЕРТИФИКАТ (tls internal) — РАСПРОСТРАНЕНИЕ НА КЛИЕНТОВ
+
+Root CA генерируется один раз и живёт долго (не путать с
+leaf-сертификатами доменов — те ротируются автоматически каждые ~сутки).
+
+Извлечь:
+docker exec caddy cat /data/caddy/pki/authorities/local/root.crt
+
+Установить на Windows:
+certutil -addstore -f "ROOT" root.crt
+
+Установить на Ubuntu/Linux:
+sudo cp root.crt /usr/local/share/ca-certificates/shelf-root-ca.crt
+sudo update-ca-certificates
+
+Firefox использует собственное хранилище сертификатов — импортировать
+отдельно через about:preferences#privacy -> View Certificates ->
+Authorities -> Import.
+
+Перевыпустить весь CA заново (например, после смены имён в блоке pki):
+docker compose down
+rm -rf ./caddy/data/caddy/pki
+docker compose up -d
+
+После этого — заново извлечь root.crt и переустановить на все клиентские
+машины (старое доверие больше не действует).
+
+
+8. ГЛОБАЛЬНЫЕ ОПЦИИ CADDYFILE — ВАЖНЫЕ ПРАВИЛА
+
+Глобальный блок { ... } (без домена) должен быть первым в файле, и должен
+быть только один — все глобальные опции (pki, default_sni, servers,
+trusted_proxies) объединяются внутри него:
+
+{
+    pki {
+        ca local {
+            name "REDHEAD UA Local CA"
+            root_cn "REDHEAD UA Root CA"
+            intermediate_cn "REDHEAD UA Intermediate CA"
+        }
+    }
+    default_sni 10.97.99.22
+    servers {
+        trusted_proxies static 10.97.99.22/32
+    }
+}
+
+# сайт-блоки ниже
+
+Порт :80 в Caddyfile трактуется как чистый HTTP — TLS на нём настраивать
+нельзя (ошибка "is HTTP, but attempts to configure TLS"). Для
+HTTPS-catch-all используйте :443 или https://
+
+
+9. FIREWALL — ОТКРЫТЬ/ЗАКРЫТЬ ПОРТЫ 80/8090 НА БЭКЕНДЕ
+
+На бэкенде (dod-sv-shelf) стоит скрипт-переключатель, работающий через
+цепочку DOCKER-USER (обычная INPUT не фильтрует Docker-проброшенные
+порты — Docker её обходит):
+
+cd ~/projects/polka-new
+sudo ./ports80-8090.sh enable    — закрыть 80/8090 для всех, кроме доверенного IP
+sudo ./ports80-8090.sh disable   — снять ограничение
+sudo ./ports80-8090.sh status    — посмотреть текущие правила
+
+Посмотреть правила напрямую:
+sudo iptables -L DOCKER-USER -n -v --line-numbers
+
+Важно: правила не переживают перезагрузку сервера без
+iptables-persistent. Если нужна персистентность:
+sudo apt install iptables-persistent
+sudo netfilter-persistent save
+
+
+10. БЫСТРЫЙ ЧЕК-ЛИСТ ПРИ ДОБАВЛЕНИИ/ПРАВКЕ САЙТА
+
+1. Отредактировать Caddyfile (внешний прокси, если сайт публичный или
+   доступен только внутренней сети; бэкенд обычно трогать не нужно — он
+   catch-all).
+2. caddy validate — проверить синтаксис.
+3. caddy reload — применить.
+4. Проверить docker logs -f caddy на ошибки.
+5. Проверить доступность: curl -v https://<домен>/ (изнутри и, если
+   нужно, снаружи разрешённых подсетей — должен быть 403).
+6. Если это внутренний сайт — убедиться, что клиентская машина уже
+   доверяет root CA (иначе будет предупреждение сертификата или тихий
+   обрыв WSS-соединения).

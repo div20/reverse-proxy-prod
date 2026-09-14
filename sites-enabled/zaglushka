@@ -1,0 +1,4 @@
+https://10.97.99.22 {
+    tls internal
+    reverse_proxy web-time-test:80
+}

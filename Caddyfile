@@ -1,0 +1,28 @@
+{
+    pki {
+        ca local {
+            name "REDHEAD UA Local CA"
+            root_cn "REDHEAD UA Root CA"
+            intermediate_cn "REDHEAD UA Intermediate CA"
+        }
+    }
+
+    default_sni 10.97.99.22
+}
+
+glpi-test.redhead.ua {
+    tls internal
+    reverse_proxy 10.96.90.54:80
+}
+
+sd.smarty.ua {
+    tls internal
+    reverse_proxy 10.97.99.21:80
+}
+
+glpi.redhead.ua {
+    tls internal
+    reverse_proxy 10.96.99.12:80
+}
+
+import sites-enabled/*

@@ -1,0 +1,32 @@
+services:
+  caddy:
+    image: caddy:2
+    container_name: caddy
+    restart: unless-stopped
+
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+      - "3000:3000"
+      - "9090:9090"
+      - "8090:8090"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./sites-enabled:/etc/caddy/sites-enabled:ro
+      - ./data:/data
+      - ./config:/config
+
+    networks:
+      - web
+      - monitoring
+      - share-net
+
+networks:
+  web:
+    driver: bridge
+  monitoring:
+    external: true
+    name: monitoring
+  share-net:
+    external: true
