@@ -2,3 +2,4 @@ data
 bkp
 config
 root.crt
+.env
